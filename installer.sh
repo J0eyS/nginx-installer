@@ -2,138 +2,139 @@
 
 set -e
 
-# === Utility Functions ===
+BOLD="\e[1m"
+RESET="\e[0m"
+GREEN="\e[32m"
+RED="\e[31m"
+YELLOW="\e[33m"
 
-header() {
-    echo -e "\n\e[1;32m=== $1 ===\e[0m"
+function pause() {
+    read -rp "Press enter to continue..."
 }
 
-error_exit() {
-    echo -e "\e[1;31m❌ $1\e[0m"
-    exit 1
+function print_header() {
+    echo -e "${BOLD}===== NGINX Auto Installer =====${RESET}"
 }
 
-pause() {
-    read -rp "Press Enter to continue..."
-}
-
-detect_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
+function detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
         OS=$ID
     else
-        error_exit "Unsupported operating system."
-    fi
-
-    if [[ "$OS" != "ubuntu" ]]; then
-        error_exit "This script only supports Ubuntu."
+        echo -e "${RED}Cannot detect OS. Aborting.${RESET}"
+        exit 1
     fi
 }
 
-# === Installer ===
-
-install_nginx() {
-    detect_os
-
-    read -rp "Do you want to enable SSL with Let's Encrypt? (y/n): " ENABLE_SSL
-    if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
-        read -rp "Enter your domain (e.g. example.com): " DOMAIN
-        read -rp "Enter your email (for Let's Encrypt): " EMAIL
+function install_nginx() {
+    echo -e "\n${GREEN}=== Installing NGINX ===${RESET}"
+    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
+        apt update && apt install -y nginx snapd
+    else
+        echo -e "${RED}Only Ubuntu/Debian are supported in this script currently.${RESET}"
+        exit 1
     fi
 
-    header "Installing NGINX"
-    sudo apt update
-    sudo apt install -y nginx
+    echo -e "\n${GREEN}=== Enabling NGINX ===${RESET}"
+    systemctl enable --now nginx
+}
 
-    if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
-        header "Installing Certbot via Snap"
-        sudo snap install core && sudo snap refresh core
-        sudo snap install --classic certbot
-        sudo ln -sf /snap/bin/certbot /usr/bin/certbot
-    fi
+function install_certbot() {
+    echo -e "\n${GREEN}=== Installing Certbot via Snap ===${RESET}"
+    snap install core && snap refresh core
+    snap install --classic certbot
+    ln -sf /snap/bin/certbot /usr/bin/certbot
+}
 
-    if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
-        header "Creating Web Root for $DOMAIN"
-        sudo mkdir -p /var/www/$DOMAIN/html
-        echo "<h1>Welcome to $DOMAIN</h1>" | sudo tee /var/www/$DOMAIN/html/index.html > /dev/null
+function configure_domain() {
+    read -rp "Enter your domain name (e.g. example.com): " DOMAIN
+    DOMAIN_DIR="/var/www/$DOMAIN/html"
+    mkdir -p "$DOMAIN_DIR"
+    chown -R www-data:www-data "$DOMAIN_DIR"
 
-        header "Creating NGINX Config"
-        CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
-        sudo tee "$CONFIG_PATH" > /dev/null <<EOF
+    echo -e "\n${GREEN}=== Creating NGINX Config for $DOMAIN ===${RESET}"
+
+    cat > "/etc/nginx/sites-available/$DOMAIN" <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
 
-    root /var/www/$DOMAIN/html;
+    root $DOMAIN_DIR;
     index index.html;
 
     location / {
         try_files \$uri \$uri/ =404;
     }
+
+    location ~ ^/.well-known/acme-challenge/ {
+        allow all;
+        root $DOMAIN_DIR;
+    }
 }
 EOF
 
-        sudo ln -sf "$CONFIG_PATH" /etc/nginx/sites-enabled/
-        sudo nginx -t && sudo systemctl reload nginx
+    ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
+    nginx -t && systemctl reload nginx
+}
 
-        header "Obtaining SSL Certificate"
-        sudo certbot --nginx -d "$DOMAIN" --email "$EMAIL" --agree-tos --no-eff-email
+function obtain_ssl() {
+    echo -e "\n${GREEN}=== Obtaining SSL Certificate for $DOMAIN ===${RESET}"
+    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+}
 
-        header "Enabling Auto Renewal"
-        sudo systemctl enable snap.certbot.renew.timer
+function open_ports() {
+    echo -e "\n${GREEN}=== Allowing HTTP/HTTPS Ports ===${RESET}"
+    if command -v ufw &>/dev/null; then
+        ufw allow 80
+        ufw allow 443
     fi
-
-    header "✅ NGINX Installation Complete"
-    pause
 }
 
-# === Uninstaller ===
+function uninstall_all() {
+    echo -e "\n${RED}=== Uninstalling Everything ===${RESET}"
 
-uninstall_nginx() {
-    read -rp "Are you sure you want to completely remove NGINX and all configs? (y/n): " CONFIRM
-    if [[ "$CONFIRM" != "y" ]]; then
-        echo "Aborted."
-        return
-    fi
+    echo -e "\nStopping and removing NGINX and Certbot..."
+    systemctl stop nginx || true
+    apt remove --purge -y nginx nginx-common || true
+    apt autoremove -y
+    snap remove certbot || true
+    rm -f /usr/bin/certbot
 
-    header "Stopping NGINX"
-    sudo systemctl stop nginx || true
-    sudo systemctl disable nginx || true
+    echo -e "\nRemoving NGINX configs and SSL..."
+    rm -rf /etc/nginx /var/www/* /etc/letsencrypt /var/log/letsencrypt /etc/systemd/system/nginx.service
+    rm -rf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
 
-    header "Removing NGINX and Certbot"
-    sudo apt purge -y nginx nginx-common nginx-core
-    sudo snap remove certbot || true
-    sudo apt autoremove -y
-    sudo apt clean
-
-    header "Cleaning Up Configs"
-    sudo rm -rf /etc/nginx /etc/letsencrypt /var/www /var/log/nginx /etc/systemd/system/snap.certbot.renew.timer*
-
-    header "✅ NGINX and all related files have been removed."
-    pause
+    echo -e "\n${GREEN}Uninstallation complete. NGINX and SSL certificates removed.${RESET}"
 }
 
-# === Menu ===
-
-main_menu() {
-    while true; do
-        clear
-        echo -e "\e[1;34m===== NGINX Auto Installer =====\e[0m"
-        echo "1) Install NGINX"
-        echo "2) Uninstall NGINX"
-        echo "3) Exit"
-        echo
-        read -rp "Choose an option [1-3]: " CHOICE
-
-        case "$CHOICE" in
-            1) install_nginx ;;
-            2) uninstall_nginx ;;
-            3) echo "Goodbye 👋"; exit 0 ;;
-            *) echo "Invalid option. Try again."; pause ;;
-        esac
-    done
+function main_menu() {
+    print_header
+    echo "1) Install NGINX with SSL"
+    echo "2) Uninstall NGINX and SSL"
+    echo "3) Exit"
+    echo
+    read -rp "Choose an option [1-3]: " choice
+    case "$choice" in
+        1)
+            detect_os
+            install_nginx
+            install_certbot
+            configure_domain
+            open_ports
+            obtain_ssl
+            echo -e "\n${GREEN}Installation complete!${RESET}"
+            ;;
+        2)
+            uninstall_all
+            ;;
+        3)
+            echo "Bye!"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid option.${RESET}"
+            ;;
+    esac
 }
 
-# === Start ===
 main_menu
-
