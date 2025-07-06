@@ -1,194 +1,113 @@
 #!/bin/bash
 
-set -e
+# Colors
+GREEN="\033[1;32m"
+RED="\033[1;31m"
+CYAN="\033[1;36m"
+NC="\033[0m"
 
-# ─────────────────────────────────────────────
-# Terminal Colors and Styling
-# ─────────────────────────────────────────────
-RESET="\e[0m"
-BOLD="\e[1m"
-RED="\e[31m"
-GREEN="\e[32m"
-YELLOW="\e[33m"
-CYAN="\e[36m"
-
-# ─────────────────────────────────────────────
-# Helper Functions
-# ─────────────────────────────────────────────
-function header() {
-    echo -e "\n${BOLD}${CYAN}== NGINX Auto Installer ==${RESET}"
-}
+# Welcome
+clear
+echo -e "${CYAN}== NGINX Auto Installer ==${NC}"
 
 function pause() {
     read -rp "Press Enter to continue..."
 }
 
 function detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
+    if [[ -e /etc/os-release ]]; then
+        . /etc/os-release
         OS=$ID
     else
-        echo -e "${RED}Could not detect OS. Aborting.${RESET}"
+        echo -e "${RED}Cannot detect OS. Aborting.${NC}"
+        exit 1
+    fi
+
+    if [[ "$OS" != "ubuntu" && "$OS" != "debian" ]]; then
+        echo -e "${RED}Unsupported OS: $OS. Only Ubuntu/Debian supported.${NC}"
         exit 1
     fi
 }
 
-function ask_yes_no() {
-    local prompt=$1
-    while true; do
-        read -rp "$prompt [y/n]: " yn
-        case $yn in
-            [Yy]*) return 0 ;;
-            [Nn]*) return 1 ;;
-            *) echo "Please answer y or n." ;;
-        esac
-    done
-}
-
-# ─────────────────────────────────────────────
-# Installation Functions
-# ─────────────────────────────────────────────
-
-function install_nginx() {
-    echo -e "${GREEN}Installing NGINX...${RESET}"
-    apt update && apt install -y nginx
-    systemctl enable --now nginx
-}
-
-function install_certbot() {
-    echo -e "${GREEN}Installing Certbot (via Snap)...${RESET}"
-    apt install -y snapd
-    snap install core && snap refresh core
-    snap install --classic certbot
-    ln -sf /snap/bin/certbot /usr/bin/certbot
-}
-
-function configure_nginx_site() {
-    read -rp "Enter your domain name (e.g. example.com): " DOMAIN
-    DOMAIN_DIR="/var/www/$DOMAIN/html"
-    mkdir -p "$DOMAIN_DIR"
-    chown -R www-data:www-data "$DOMAIN_DIR"
-    echo "<html><body><h1>$DOMAIN</h1></body></html>" > "$DOMAIN_DIR/index.html"
-
-    echo -e "${GREEN}Creating NGINX site config for $DOMAIN...${RESET}"
-
-    cat > "/etc/nginx/sites-available/$DOMAIN" <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-
-    root $DOMAIN_DIR;
-    index index.html;
-
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-
-    location ~ ^/.well-known/acme-challenge/ {
-        allow all;
-        root $DOMAIN_DIR;
-    }
-}
-EOF
-
-    ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
-    nginx -t && systemctl reload nginx
-}
-
-function obtain_ssl_certificate() {
-    echo -e "${GREEN}Requesting SSL certificate from Let's Encrypt...${RESET}"
-    certbot certonly --webroot -w "/var/www/$DOMAIN/html" -d "$DOMAIN" --agree-tos --register-unsafely-without-email --non-interactive
-
-    echo -e "${GREEN}Updating NGINX config with SSL...${RESET}"
-    cat > "/etc/nginx/sites-available/$DOMAIN" <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    return 301 https://\$host\$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name $DOMAIN;
-
-    root $DOMAIN_DIR;
-    index index.html;
-
-    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
-
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-}
-EOF
-
-    nginx -t && systemctl reload nginx
-    echo -e "${GREEN}SSL is now active for https://$DOMAIN${RESET}"
-}
-
-function allow_firewall_ports() {
-    if command -v ufw &>/dev/null; then
-        echo -e "${GREEN}Allowing ports 80 and 443 in UFW...${RESET}"
-        ufw allow 80
-        ufw allow 443
+function ask_ssl() {
+    read -rp "Do you want to enable SSL with Certbot? (y/n): " ENABLE_SSL
+    if [[ "$ENABLE_SSL" == "y" || "$ENABLE_SSL" == "Y" ]]; then
+        read -rp "Enter your domain name (e.g. example.com): " DOMAIN
+        USE_SSL=true
+    else
+        USE_SSL=false
     fi
 }
 
-# ─────────────────────────────────────────────
-# Uninstall Function
-# ─────────────────────────────────────────────
+function install_nginx() {
+    echo -e "${CYAN}Installing NGINX...${NC}"
+    apt update -y && apt install -y nginx
+    systemctl enable nginx
+    systemctl start nginx
+}
+
+function install_certbot_apt() {
+    echo -e "${CYAN}Installing Certbot (via apt)...${NC}"
+    apt install -y software-properties-common
+    add-apt-repository universe -y
+    apt update -y
+    apt install -y certbot python3-certbot-nginx
+}
+
+function obtain_ssl() {
+    echo -e "${CYAN}Setting up SSL for ${DOMAIN}...${NC}"
+    systemctl stop nginx
+    sleep 1
+    systemctl start nginx
+
+    # Certbot will configure nginx itself
+    certbot --nginx -d "$DOMAIN"
+
+    echo -e "${GREEN}SSL certificate obtained and NGINX configured.${NC}"
+}
+
 function uninstall_all() {
-    echo -e "${RED}Uninstalling NGINX and Certbot...${RESET}"
-    systemctl stop nginx || true
-    apt remove --purge -y nginx nginx-common snapd || true
+    echo -e "${RED}Uninstalling NGINX and Certbot...${NC}"
+    systemctl stop nginx
+    apt purge -y nginx certbot python3-certbot-nginx
     apt autoremove -y
-    snap remove certbot || true
-    rm -f /usr/bin/certbot
-
-    echo -e "${YELLOW}Removing NGINX configs and website data...${RESET}"
-    rm -rf /etc/nginx /etc/letsencrypt /var/www /var/log/letsencrypt /etc/nginx/sites-available /etc/nginx/sites-enabled
-
-    echo -e "${GREEN}Everything was removed successfully.${RESET}"
+    rm -rf /etc/nginx /etc/letsencrypt /var/www/html
+    echo -e "${GREEN}Cleanup complete.${NC}"
 }
 
-# ─────────────────────────────────────────────
-# Main Menu
-# ─────────────────────────────────────────────
-function main_menu() {
+function install_flow() {
+    detect_os
+    ask_ssl
+    install_nginx
+
+    if [[ "$USE_SSL" == true ]]; then
+        install_certbot_apt
+        obtain_ssl
+    fi
+
+    echo -e "${GREEN}Installation complete.${NC}"
+    pause
+}
+
+function uninstall_flow() {
+    uninstall_all
+    pause
+}
+
+# Menu
+while true; do
     clear
-    header
-    echo -e "${BOLD}1) Install NGINX${RESET}"
-    echo -e "${BOLD}2) Uninstall everything${RESET}"
-    echo -e "${BOLD}3) Exit${RESET}"
-    echo
+    echo -e "${CYAN}== NGINX Auto Installer ==${NC}"
+    echo -e "${GREEN}1)${NC} Install NGINX"
+    echo -e "${RED}2)${NC} Uninstall everything"
+    echo -e "${CYAN}3)${NC} Exit"
+    echo ""
+    read -rp "Select an option: " CHOICE
 
-    read -rp "Choose an option [1-3]: " choice
-    case "$choice" in
-        1)
-            detect_os
-            install_nginx
-            if ask_yes_no "Do you want to configure SSL with Certbot for a domain?"; then
-                install_certbot
-                configure_nginx_site
-                allow_firewall_ports
-                obtain_ssl_certificate
-            else
-                echo -e "${YELLOW}SSL setup skipped.${RESET}"
-            fi
-            echo -e "${GREEN}Installation complete.${RESET}"
-            ;;
-        2)
-            uninstall_all
-            ;;
-        3)
-            echo "Goodbye!"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Invalid option. Try again.${RESET}"
-            ;;
+    case "$CHOICE" in
+        1) install_flow ;;
+        2) uninstall_flow ;;
+        3) echo "Goodbye!" && exit 0 ;;
+        *) echo -e "${RED}Invalid choice.${NC}" && sleep 1 ;;
     esac
-}
-
-main_menu
+done
