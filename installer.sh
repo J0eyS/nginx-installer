@@ -31,7 +31,7 @@ function detect_os() {
 
 function ask_ssl() {
     read -rp "Do you want to enable SSL with Certbot? (y/n): " ENABLE_SSL
-    if [[ "$ENABLE_SSL" == "y" || "$ENABLE_SSL" == "Y" ]]; then
+    if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
         read -rp "Enter your domain name (e.g. example.com): " DOMAIN
         USE_SSL=true
     else
@@ -41,27 +41,37 @@ function ask_ssl() {
 
 function install_nginx() {
     echo -e "${CYAN}Installing NGINX...${NC}"
-    apt update -y && apt install -y nginx
+    apt update -y
+    apt install -y nginx
     systemctl enable nginx
     systemctl start nginx
 }
 
 function install_certbot_apt() {
     echo -e "${CYAN}Installing Certbot (via apt)...${NC}"
-    apt install -y software-properties-common
-    add-apt-repository universe -y
     apt update -y
+    apt install -y software-properties-common
+
+    # On Ubuntu, add universe repo if missing
+    if [[ "$OS" == "ubuntu" ]]; then
+        add-apt-repository universe
+        apt update -y
+    fi
+
     apt install -y certbot python3-certbot-nginx
 }
 
 function obtain_ssl() {
     echo -e "${CYAN}Setting up SSL for ${DOMAIN}...${NC}"
-    systemctl stop nginx
-    sleep 1
+
+    # Ensure nginx is running so certbot --nginx can detect it
     systemctl start nginx
 
     # Certbot will configure nginx itself
-    certbot --nginx -d "$DOMAIN"
+    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "admin@$DOMAIN" || {
+        echo -e "${RED}Certbot failed to obtain SSL certificate.${NC}"
+        exit 1
+    }
 
     echo -e "${GREEN}SSL certificate obtained and NGINX configured.${NC}"
 }
