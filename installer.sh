@@ -1,71 +1,59 @@
 #!/bin/bash
 
-# install-nginx.sh
-# Ubuntu-based NGINX install script with SSL option and full config
-
 set -e
 
-# Functions
+# === Helper Functions ===
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS=$ID
-        VERSION=$VERSION_ID
     else
-        echo "Unsupported OS. Exiting."
+        echo "❌ Unsupported OS."
         exit 1
     fi
 
     if [[ "$OS" != "ubuntu" ]]; then
-        echo "This script is only designed for Ubuntu."
+        echo "❌ This script only supports Ubuntu."
         exit 1
     fi
 }
 
-prompt_ssl() {
+main_menu() {
+    echo "===== NGINX Auto Installer ====="
+    echo "1) Install NGINX"
+    echo "2) Uninstall NGINX"
+    echo "3) Exit"
+    read -rp "Choose an option [1-3]: " CHOICE
+
+    case "$CHOICE" in
+        1) install_nginx ;;
+        2) uninstall_nginx ;;
+        3) echo "Bye 👋"; exit 0 ;;
+        *) echo "Invalid option"; main_menu ;;
+    esac
+}
+
+# === Install NGINX ===
+install_nginx() {
+    detect_os
+
     read -rp "Do you want to enable SSL with Let's Encrypt? (y/n): " ENABLE_SSL
     if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
-        read -rp "Enter your domain name (e.g. example.com): " DOMAIN
-        read -rp "Enter your email for Let's Encrypt registration: " EMAIL
+        read -rp "Enter your domain (e.g. example.com): " DOMAIN
+        read -rp "Enter your email (for Let's Encrypt): " EMAIL
     fi
-}
 
-install_nginx() {
-    echo "Updating packages..."
+    echo "📦 Installing NGINX..."
     sudo apt update
-
-    echo "Installing NGINX..."
     sudo apt install -y nginx
 
-    echo "Enabling and starting NGINX..."
-    sudo systemctl enable nginx
-    sudo systemctl start nginx
-}
+    echo "📂 Creating web root..."
+    sudo mkdir -p /var/www/$DOMAIN/html
+    echo "<h1>Welcome to $DOMAIN</h1>" | sudo tee /var/www/$DOMAIN/html/index.html
 
-configure_firewall() {
-    if command -v ufw >/dev/null 2>&1; then
-        echo "Configuring UFW firewall..."
-        sudo ufw allow 'Nginx Full'
-    else
-        echo "UFW not installed. Skipping firewall config."
-    fi
-}
-
-setup_ssl() {
-    echo "Installing Certbot for SSL..."
-    sudo apt install -y certbot python3-certbot-nginx
-
-    echo "Obtaining SSL certificate for $DOMAIN..."
-    sudo certbot --nginx -d "$DOMAIN" --email "$EMAIL" --agree-tos --no-eff-email
-
-    echo "SSL has been set up for $DOMAIN."
-}
-
-write_nginx_config() {
-    echo "Creating default NGINX site config..."
-
-    CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
-    sudo tee "$CONFIG_PATH" > /dev/null <<EOF
+    echo "📝 Creating NGINX config..."
+    CONFIG="/etc/nginx/sites-available/$DOMAIN"
+    sudo tee "$CONFIG" > /dev/null <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -79,67 +67,41 @@ server {
 }
 EOF
 
-    sudo mkdir -p /var/www/$DOMAIN/html
-    echo "<h1>Welcome to $DOMAIN</h1>" | sudo tee /var/www/$DOMAIN/html/index.html
-
-    sudo ln -sf "$CONFIG_PATH" /etc/nginx/sites-enabled/
+    sudo ln -sf "$CONFIG" /etc/nginx/sites-enabled/
     sudo nginx -t && sudo systemctl reload nginx
+
+    if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
+        echo "🔐 Installing Certbot..."
+        sudo apt install -y certbot python3-certbot-nginx
+        echo "🔒 Obtaining certificate..."
+        sudo certbot --nginx -d "$DOMAIN" --email "$EMAIL" --agree-tos --no-eff-email
+    fi
+
+    echo "✅ NGINX is installed and configured!"
 }
 
-# Uninstall script generator
-write_uninstaller() {
-    cat <<'EOF' | sudo tee /usr/local/bin/uninstall-nginx.sh > /dev/null
-#!/bin/bash
+# === Uninstall NGINX ===
+uninstall_nginx() {
+    read -rp "Are you sure you want to remove NGINX and all configs? (y/n): " CONFIRM
+    if [[ "$CONFIRM" != "y" ]]; then
+        echo "Aborted."
+        exit 0
+    fi
 
-set -e
+    echo "🛑 Stopping NGINX..."
+    sudo systemctl stop nginx || true
+    sudo systemctl disable nginx || true
 
-read -rp "Are you sure you want to completely remove NGINX and all related files? (y/n): " CONFIRM
-if [[ "$CONFIRM" != "y" ]]; then
-    echo "Aborted."
-    exit 0
-fi
+    echo "🧹 Removing packages..."
+    sudo apt purge -y nginx nginx-common nginx-core certbot python3-certbot-nginx
+    sudo apt autoremove -y
+    sudo apt clean
 
-echo "Stopping and disabling NGINX..."
-sudo systemctl stop nginx
-sudo systemctl disable nginx
+    echo "🧼 Cleaning up configs..."
+    sudo rm -rf /etc/nginx /etc/letsencrypt /var/www/* /var/log/nginx
 
-echo "Purging NGINX and Certbot..."
-sudo apt purge -y nginx nginx-common nginx-core certbot python3-certbot-nginx
-sudo apt autoremove -y
-sudo apt clean
-
-echo "Removing configuration and web root..."
-sudo rm -rf /etc/nginx /var/www/* /var/log/nginx /etc/letsencrypt /var/lib/letsencrypt
-
-echo "Removing uninstall script..."
-sudo rm -- "$0"
-
-echo "NGINX and all traces have been removed."
-EOF
-
-    sudo chmod +x /usr/local/bin/uninstall-nginx.sh
-    echo "Uninstaller created at /usr/local/bin/uninstall-nginx.sh"
+    echo "✅ NGINX and all related files have been removed."
 }
 
-# Run steps
-detect_os
-prompt_ssl
-install_nginx
-configure_firewall
-
-if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
-    write_nginx_config
-    setup_ssl
-else
-    echo "Skipping SSL setup."
-    DOMAIN="default"
-fi
-
-write_uninstaller
-
-echo "✅ NGINX installation complete."
-if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
-    echo "🌐 Visit https://$DOMAIN to test your SSL-enabled site."
-else
-    echo "🌐 Visit http://localhost to test NGINX."
-fi
+# === Start ===
+main_menu
