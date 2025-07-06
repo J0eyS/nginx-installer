@@ -2,18 +2,25 @@
 
 set -e
 
-BOLD="\e[1m"
+# ─────────────────────────────────────────────
+# Terminal Colors and Styling
+# ─────────────────────────────────────────────
 RESET="\e[0m"
-GREEN="\e[32m"
+BOLD="\e[1m"
 RED="\e[31m"
+GREEN="\e[32m"
 YELLOW="\e[33m"
+CYAN="\e[36m"
 
-function pause() {
-    read -rp "Press enter to continue..."
+# ─────────────────────────────────────────────
+# Helper Functions
+# ─────────────────────────────────────────────
+function header() {
+    echo -e "\n${BOLD}${CYAN}== NGINX Auto Installer ==${RESET}"
 }
 
-function print_header() {
-    echo -e "${BOLD}===== NGINX Auto Installer =====${RESET}"
+function pause() {
+    read -rp "Press Enter to continue..."
 }
 
 function detect_os() {
@@ -21,38 +28,49 @@ function detect_os() {
         source /etc/os-release
         OS=$ID
     else
-        echo -e "${RED}Cannot detect OS. Aborting.${RESET}"
+        echo -e "${RED}Could not detect OS. Aborting.${RESET}"
         exit 1
     fi
 }
 
-function install_nginx() {
-    echo -e "\n${GREEN}=== Installing NGINX ===${RESET}"
-    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
-        apt update && apt install -y nginx snapd
-    else
-        echo -e "${RED}Only Ubuntu/Debian are supported in this script currently.${RESET}"
-        exit 1
-    fi
+function ask_yes_no() {
+    local prompt=$1
+    while true; do
+        read -rp "$prompt [y/n]: " yn
+        case $yn in
+            [Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+            *) echo "Please answer y or n." ;;
+        esac
+    done
+}
 
-    echo -e "\n${GREEN}=== Enabling NGINX ===${RESET}"
+# ─────────────────────────────────────────────
+# Installation Functions
+# ─────────────────────────────────────────────
+
+function install_nginx() {
+    echo -e "${GREEN}Installing NGINX...${RESET}"
+    apt update && apt install -y nginx
     systemctl enable --now nginx
 }
 
 function install_certbot() {
-    echo -e "\n${GREEN}=== Installing Certbot via Snap ===${RESET}"
+    echo -e "${GREEN}Installing Certbot (via Snap)...${RESET}"
+    apt install -y snapd
     snap install core && snap refresh core
     snap install --classic certbot
     ln -sf /snap/bin/certbot /usr/bin/certbot
 }
 
-function configure_domain() {
+function configure_nginx_site() {
     read -rp "Enter your domain name (e.g. example.com): " DOMAIN
     DOMAIN_DIR="/var/www/$DOMAIN/html"
     mkdir -p "$DOMAIN_DIR"
     chown -R www-data:www-data "$DOMAIN_DIR"
+    echo "<html><body><h1>$DOMAIN</h1></body></html>" > "$DOMAIN_DIR/index.html"
 
-    echo -e "\n${GREEN}=== Creating NGINX Config for $DOMAIN ===${RESET}"
+    echo -e "${GREEN}Creating NGINX site config for $DOMAIN...${RESET}"
 
     cat > "/etc/nginx/sites-available/$DOMAIN" <<EOF
 server {
@@ -77,62 +95,98 @@ EOF
     nginx -t && systemctl reload nginx
 }
 
-function obtain_ssl() {
-    echo -e "\n${GREEN}=== Obtaining SSL Certificate for $DOMAIN ===${RESET}"
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+function obtain_ssl_certificate() {
+    echo -e "${GREEN}Requesting SSL certificate from Let's Encrypt...${RESET}"
+    certbot certonly --webroot -w "/var/www/$DOMAIN/html" -d "$DOMAIN" --agree-tos --register-unsafely-without-email --non-interactive
+
+    echo -e "${GREEN}Updating NGINX config with SSL...${RESET}"
+    cat > "/etc/nginx/sites-available/$DOMAIN" <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$host\$request_uri;
 }
 
-function open_ports() {
-    echo -e "\n${GREEN}=== Allowing HTTP/HTTPS Ports ===${RESET}"
+server {
+    listen 443 ssl;
+    server_name $DOMAIN;
+
+    root $DOMAIN_DIR;
+    index index.html;
+
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+EOF
+
+    nginx -t && systemctl reload nginx
+    echo -e "${GREEN}SSL is now active for https://$DOMAIN${RESET}"
+}
+
+function allow_firewall_ports() {
     if command -v ufw &>/dev/null; then
+        echo -e "${GREEN}Allowing ports 80 and 443 in UFW...${RESET}"
         ufw allow 80
         ufw allow 443
     fi
 }
 
+# ─────────────────────────────────────────────
+# Uninstall Function
+# ─────────────────────────────────────────────
 function uninstall_all() {
-    echo -e "\n${RED}=== Uninstalling Everything ===${RESET}"
-
-    echo -e "\nStopping and removing NGINX and Certbot..."
+    echo -e "${RED}Uninstalling NGINX and Certbot...${RESET}"
     systemctl stop nginx || true
-    apt remove --purge -y nginx nginx-common || true
+    apt remove --purge -y nginx nginx-common snapd || true
     apt autoremove -y
     snap remove certbot || true
     rm -f /usr/bin/certbot
 
-    echo -e "\nRemoving NGINX configs and SSL..."
-    rm -rf /etc/nginx /var/www/* /etc/letsencrypt /var/log/letsencrypt /etc/systemd/system/nginx.service
-    rm -rf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
+    echo -e "${YELLOW}Removing NGINX configs and website data...${RESET}"
+    rm -rf /etc/nginx /etc/letsencrypt /var/www /var/log/letsencrypt /etc/nginx/sites-available /etc/nginx/sites-enabled
 
-    echo -e "\n${GREEN}Uninstallation complete. NGINX and SSL certificates removed.${RESET}"
+    echo -e "${GREEN}Everything was removed successfully.${RESET}"
 }
 
+# ─────────────────────────────────────────────
+# Main Menu
+# ─────────────────────────────────────────────
 function main_menu() {
-    print_header
-    echo "1) Install NGINX with SSL"
-    echo "2) Uninstall NGINX and SSL"
-    echo "3) Exit"
+    clear
+    header
+    echo -e "${BOLD}1) Install NGINX${RESET}"
+    echo -e "${BOLD}2) Uninstall everything${RESET}"
+    echo -e "${BOLD}3) Exit${RESET}"
     echo
+
     read -rp "Choose an option [1-3]: " choice
     case "$choice" in
         1)
             detect_os
             install_nginx
-            install_certbot
-            configure_domain
-            open_ports
-            obtain_ssl
-            echo -e "\n${GREEN}Installation complete!${RESET}"
+            if ask_yes_no "Do you want to configure SSL with Certbot for a domain?"; then
+                install_certbot
+                configure_nginx_site
+                allow_firewall_ports
+                obtain_ssl_certificate
+            else
+                echo -e "${YELLOW}SSL setup skipped.${RESET}"
+            fi
+            echo -e "${GREEN}Installation complete.${RESET}"
             ;;
         2)
             uninstall_all
             ;;
         3)
-            echo "Bye!"
+            echo "Goodbye!"
             exit 0
             ;;
         *)
-            echo -e "${RED}Invalid option.${RESET}"
+            echo -e "${RED}Invalid option. Try again.${RESET}"
             ;;
     esac
 }
