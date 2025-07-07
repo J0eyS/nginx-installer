@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Colors
 GREEN="\033[1;32m"
@@ -13,12 +14,13 @@ USE_SSL=false
 UPGRADE_PKGS=false
 DOMAIN=""
 
-function pause() {
+pause() {
   read -rp $'\nPress Enter to continue...'
 }
 
-function detect_os() {
+detect_os() {
   if [[ -e /etc/os-release ]]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     OS=$ID
   else
@@ -32,65 +34,88 @@ function detect_os() {
   fi
 }
 
-function pre_install_choices() {
+pre_install_choices() {
   echo -e "${CYAN}Would you like to upgrade system packages before continuing?${NC}"
-  read -rp "Upgrade packages? (y/n): " ANSWER
-  if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
-    UPGRADE_PKGS=true
-  fi
+  while true; do
+    read -rp "Upgrade packages? (y/n): " ANSWER
+    case "${ANSWER,,}" in
+      y|yes) UPGRADE_PKGS=true; break ;;
+      n|no) UPGRADE_PKGS=false; break ;;
+      *) echo "Please answer y or n." ;;
+    esac
+  done
 
   echo -e "${CYAN}Would you like to install SSL via Certbot?${NC}"
-  read -rp "Enable SSL with Certbot? (y/n): " ANSWER
-  if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
-    USE_SSL=true
-    read -rp "Enter your domain name (e.g., example.com): " DOMAIN
-  fi
+  while true; do
+    read -rp "Enable SSL with Certbot? (y/n): " ANSWER
+    case "${ANSWER,,}" in
+      y|yes)
+        USE_SSL=true
+        while true; do
+          read -rp "Enter your domain name (e.g., example.com): " DOMAIN
+          if [[ -n "$DOMAIN" ]]; then
+            break
+          else
+            echo "Domain name cannot be empty."
+          fi
+        done
+        break
+        ;;
+      n|no)
+        USE_SSL=false
+        break
+        ;;
+      *)
+        echo "Please answer y or n."
+        ;;
+    esac
+  done
 }
 
-function install_nginx() {
-  echo -e "${GREEN}[+] Updating packages...${NC}"
-  apt update -y
+install_nginx() {
+  echo -e "${GREEN}[+] Updating package lists...${NC}"
+  sudo apt update
 
   if [[ "$UPGRADE_PKGS" == true ]]; then
     echo -e "${GREEN}[+] Upgrading packages...${NC}"
-    apt upgrade -y
+    sudo apt upgrade -y
   fi
 
   echo -e "${GREEN}[+] Installing NGINX...${NC}"
-  apt install -y nginx
-  systemctl enable --now nginx
+  sudo apt install -y nginx
+  sudo systemctl enable --now nginx
 }
 
-function install_certbot() {
-  echo -e "${GREEN}[+] Installing Certbot...${NC}"
-  apt install -y software-properties-common
-  add-apt-repository universe -y
-  apt update -y
-  apt install -y certbot python3-certbot-nginx
+install_certbot() {
+  echo -e "${GREEN}[+] Installing Certbot and dependencies...${NC}"
+  sudo apt install -y software-properties-common
+  sudo add-apt-repository universe -y
+  sudo apt update
+  sudo apt install -y certbot python3-certbot-nginx
 }
 
-function obtain_ssl() {
+obtain_ssl() {
   echo -e "${GREEN}[+] Obtaining SSL certificate for ${DOMAIN}...${NC}"
-  certbot --nginx -d "$DOMAIN"
+  sudo certbot --nginx -d "$DOMAIN"
 }
 
-function uninstall_all() {
+uninstall_all() {
   echo -e "${RED}[-] Uninstalling NGINX and Certbot...${NC}"
-  systemctl stop nginx
-  apt purge -y nginx certbot python3-certbot-nginx
-  apt autoremove -y
-  rm -rf /etc/nginx /etc/letsencrypt /var/www/html
+  sudo systemctl stop nginx || true
+  sudo apt purge -y nginx certbot python3-certbot-nginx || true
+  sudo apt autoremove -y
+  sudo rm -rf /etc/nginx /etc/letsencrypt /var/www/html
   echo -e "${GREEN}[✓] Uninstallation and cleanup complete.${NC}"
 }
 
-function check_if_installed() {
+check_if_installed() {
   if command -v nginx >/dev/null 2>&1; then
     echo -e "${RED}[!] NGINX is already installed. Aborting installation.${NC}"
     exit 1
   fi
 }
 
-function install_flow() {
+install_flow() {
   detect_os
   check_if_installed
   pre_install_choices
@@ -103,7 +128,7 @@ function install_flow() {
   pause
 }
 
-function uninstall_flow() {
+uninstall_flow() {
   uninstall_all
   pause
 }
@@ -123,7 +148,7 @@ while true; do
   case "$CHOICE" in
     1) install_flow ;;
     2) uninstall_flow ;;
-    3) echo "Goodbye!" && exit 0 ;;
+    3) echo -e "${CYAN}Goodbye!${NC}" && exit 0 ;;
     *) echo -e "${RED}Invalid choice.${NC}" && sleep 1 ;;
   esac
 done
