@@ -1,209 +1,147 @@
 #!/bin/bash
 set -euo pipefail
 
-# Colors
-GREEN="\033[1;32m"
-RED="\033[1;31m"
-CYAN="\033[1;36m"
-YELLOW="\033[1;33m"
-NC="\033[0m"
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
 
-# Globals
-OS=""
-USE_SSL=false
-UPGRADE_PKGS=false
-DOMAIN=""
+info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error()   { echo -e "${RED}[ERROR]${NC} $*"; }
+prompt()  { echo -ne "${CYAN}$*${NC} "; }
 
-pause() {
-  read -rp $'\nPress Enter to continue...'
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        error "Please run as root: sudo bash $0"
+        exit 1
+    fi
 }
 
-detect_os() {
-  if [[ -e /etc/os-release ]]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    OS=$ID
-  else
-    echo -e "${RED}[!] Cannot detect OS. Aborting.${NC}"
-    exit 1
-  fi
-
-  if [[ "$OS" != "ubuntu" && "$OS" != "debian" ]]; then
-    echo -e "${RED}[!] Unsupported OS: $OS. Only Ubuntu/Debian are supported.${NC}"
-    exit 1
-  fi
-}
-
-pre_install_choices() {
-  echo -e "${CYAN}Would you like to upgrade system packages before continuing?${NC}"
-  while true; do
-    read -rp "Upgrade packages? (y/n): " ANSWER
-    case "${ANSWER,,}" in
-      y|yes) UPGRADE_PKGS=true; break ;;
-      n|no) UPGRADE_PKGS=false; break ;;
-      *) echo "Please answer y or n." ;;
-    esac
-  done
-
-  echo -e "${CYAN}Would you like to install SSL via Certbot?${NC}"
-  while true; do
-    read -rp "Enable SSL with Certbot? (y/n): " ANSWER
-    case "${ANSWER,,}" in
-      y|yes)
-        USE_SSL=true
-        while true; do
-          read -rp "Enter your domain name (e.g., example.com): " DOMAIN
-          if [[ -n "$DOMAIN" ]]; then
+read_domain() {
+    while true; do
+        prompt "Enter your domain name (e.g. example.com):"
+        read -r domain
+        domain=${domain,,} # lowercase
+        if [[ -z "$domain" ]]; then
+            warn "Domain name cannot be empty."
+            continue
+        fi
+        if [[ "$domain" =~ ^[a-z0-9.-]+$ ]]; then
+            info "Domain set to: $domain"
             break
-          else
-            echo "Domain name cannot be empty."
-          fi
-        done
-        break
-        ;;
-      n|no)
-        USE_SSL=false
-        break
-        ;;
-      *)
-        echo "Please answer y or n."
-        ;;
-    esac
-  done
+        else
+            warn "Invalid domain format. Only letters, digits, dots and hyphens allowed."
+        fi
+    done
 }
 
 install_nginx() {
-  echo -e "${GREEN}[+] Updating package lists...${NC}"
-  sudo apt update
+    info "Updating package cache..."
+    apt update -qq
 
-  if [[ "$UPGRADE_PKGS" == true ]]; then
-    echo -e "${GREEN}[+] Upgrading packages...${NC}"
-    sudo apt upgrade -y
-  fi
+    info "Installing Nginx..."
+    apt install -y nginx >/dev/null
 
-  echo -e "${GREEN}[+] Installing NGINX...${NC}"
-  sudo apt install -y nginx
-  sudo systemctl enable nginx
+    info "Allowing 'Nginx Full' profile through UFW firewall (if UFW active)..."
+    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
+        ufw allow 'Nginx Full'
+    fi
 
-  # Remove default site config to avoid conflicts
-  if [[ -f /etc/nginx/sites-enabled/default ]]; then
-    echo -e "${YELLOW}[!] Removing default nginx site config...${NC}"
-    sudo rm /etc/nginx/sites-enabled/default
-  fi
+    info "Starting and enabling Nginx service..."
+    systemctl enable --now nginx
 
-  # Check if nginx.conf exists, if not reinstall and create minimal config
-  if [[ ! -f /etc/nginx/nginx.conf ]]; then
-    echo -e "${RED}[!] /etc/nginx/nginx.conf missing! Reinstalling nginx-common and nginx packages...${NC}"
-    sudo apt install --reinstall -y nginx-common nginx
-
-    if [[ ! -f /etc/nginx/nginx.conf ]]; then
-      echo -e "${YELLOW}[!] Still missing nginx.conf, creating minimal default config...${NC}"
-      sudo mkdir -p /etc/nginx
-      sudo tee /etc/nginx/nginx.conf > /dev/null <<EOF
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-
-events {
-    worker_connections 768;
+    info "Nginx installed and running."
 }
 
-http {
-    sendfile on;
-    tcp_nopush on;
-    types_hash_max_size 2048;
+setup_nginx_server_block() {
+    local conf_path="/etc/nginx/sites-available/$domain"
+    info "Creating Nginx server block for $domain..."
 
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
+    cat > "$conf_path" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
 
-    access_log /var/log/nginx/access.log;
-    error_log /var/log/nginx/error.log;
+    server_name $domain;
 
-    keepalive_timeout 65;
+    root /var/www/$domain/html;
+    index index.html;
 
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
 }
 EOF
-    fi
-  fi
 
-  echo -e "${GREEN}[+] Testing nginx configuration...${NC}"
-  sudo nginx -t
+    info "Creating web root directory..."
+    mkdir -p /var/www/"$domain"/html
 
-  echo -e "${GREEN}[+] Starting nginx...${NC}"
-  if ! sudo systemctl restart nginx; then
-    echo -e "${YELLOW}[!] systemctl restart nginx failed, trying service command...${NC}"
-    if ! sudo service nginx restart; then
-      echo -e "${YELLOW}[!] service restart failed, running nginx directly...${NC}"
-      sudo nginx
-    fi
-  fi
+    info "Setting ownership to www-data..."
+    chown -R www-data:www-data /var/www/"$domain"/html
+
+    info "Creating sample index.html..."
+    cat > /var/www/"$domain"/html/index.html <<EOF
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Welcome to $domain!</title>
+</head>
+<body>
+    <h1>Success! Nginx is installed and serving $domain.</h1>
+</body>
+</html>
+EOF
+
+    info "Enabling site and disabling default..."
+    ln -sf "$conf_path" /etc/nginx/sites-enabled/
+    rm -f /etc/nginx/sites-enabled/default
+
+    info "Testing Nginx configuration..."
+    nginx -t
+
+    info "Reloading Nginx to apply changes..."
+    systemctl reload nginx
 }
 
 install_certbot() {
-  echo -e "${GREEN}[+] Installing Certbot and dependencies...${NC}"
-  sudo apt install -y software-properties-common
-  sudo add-apt-repository universe -y
-  sudo apt update
-  sudo apt install -y certbot python3-certbot-nginx
+    info "Installing Certbot and Nginx plugin..."
+    apt update -qq
+    apt install -y certbot python3-certbot-nginx >/dev/null
 }
 
 obtain_ssl() {
-  echo -e "${GREEN}[+] Obtaining SSL certificate for ${DOMAIN}...${NC}"
-  sudo certbot --nginx -d "$DOMAIN"
+    info "Obtaining SSL certificate for $domain via Certbot..."
+    if certbot --nginx -d "$domain" --non-interactive --agree-tos -m "admin@$domain" --redirect; then
+        info "SSL certificate installed successfully for $domain!"
+    else
+        error "Failed to obtain SSL certificate. Check DNS and try again."
+    fi
 }
 
-uninstall_all() {
-  echo -e "${RED}[-] Uninstalling NGINX and Certbot...${NC}"
-  sudo systemctl stop nginx || true
-  sudo apt purge -y nginx certbot python3-certbot-nginx || true
-  sudo apt autoremove -y
-  sudo rm -rf /etc/nginx /etc/letsencrypt /var/www/html
-  echo -e "${GREEN}[✓] Uninstallation and cleanup complete.${NC}"
+main() {
+    check_root
+    read_domain
+    install_nginx
+    setup_nginx_server_block
+
+    echo
+    prompt "Install free SSL certificate for $domain? (y/N):"
+    read -r ssl_choice
+    ssl_choice=${ssl_choice,,}
+
+    if [[ "$ssl_choice" == "y" || "$ssl_choice" == "yes" ]]; then
+        install_certbot
+        obtain_ssl
+    else
+        info "Skipping SSL installation."
+    fi
+
+    echo
+    info "Done! Visit your site at: http://$domain"
+    info "If SSL was installed, visit https://$domain"
 }
 
-check_if_installed() {
-  if command -v nginx >/dev/null 2>&1; then
-    echo -e "${RED}[!] NGINX is already installed. Aborting installation.${NC}"
-    exit 1
-  fi
-}
-
-install_flow() {
-  detect_os
-  check_if_installed
-  pre_install_choices
-  install_nginx
-  if [[ "$USE_SSL" == true ]]; then
-    install_certbot
-    obtain_ssl
-  fi
-  echo -e "\n${GREEN}[✓] Installation complete.${NC}"
-  pause
-}
-
-uninstall_flow() {
-  uninstall_all
-  pause
-}
-
-# Main Menu
-while true; do
-  clear
-  detect_os
-  echo -e "${CYAN}== NGINX Auto Installer ==${NC}"
-  echo -e "Detected OS: ${YELLOW}${OS^^}${NC}\n"
-  echo -e "${GREEN}1)${NC} Install NGINX"
-  echo -e "${RED}2)${NC} Uninstall everything"
-  echo -e "${CYAN}3)${NC} Exit"
-  echo ""
-  read -rp "Select an option: " CHOICE
-
-  case "$CHOICE" in
-    1) install_flow ;;
-    2) uninstall_flow ;;
-    3) echo -e "${CYAN}Goodbye!${NC}" && exit 0 ;;
-    *) echo -e "${RED}Invalid choice.${NC}" && sleep 1 ;;
-  esac
-done
+main
