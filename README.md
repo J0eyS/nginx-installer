@@ -49,6 +49,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/i
 
 ---
 
+## AI
+
+ This installer script and/or the description was created with the help of AI tools.
+
+---
+
 ## Contributing
 
 Contributions and feedback are welcome! Feel free to open issues or submit pull requests to improve support or add features.
+
+
