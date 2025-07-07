@@ -20,9 +20,24 @@ check_root() {
     fi
 }
 
+detect_os() {
+    # Attempt to detect OS and version
+    if command -v lsb_release &>/dev/null; then
+        os_name=$(lsb_release -si)
+        os_version=$(lsb_release -sr)
+    elif [[ -f /etc/os-release ]]; then
+        os_name=$(grep "^NAME=" /etc/os-release | cut -d= -f2 | tr -d \")
+        os_version=$(grep "^VERSION_ID=" /etc/os-release | cut -d= -f2 | tr -d \")
+    else
+        os_name="Unknown OS"
+        os_version=""
+    fi
+    echo "$os_name $os_version"
+}
+
 read_domain() {
     while true; do
-        prompt "Enter your domain name (e.g. example.com):"
+        prompt "Enter your domain name (e.g. example.com): "
         read -r domain
         domain=${domain,,} # lowercase
         if [[ -z "$domain" ]]; then
@@ -113,35 +128,111 @@ install_certbot() {
 }
 
 obtain_ssl() {
+    local email="$1"
     info "Obtaining SSL certificate for $domain via Certbot..."
-    if certbot --nginx -d "$domain" --non-interactive --agree-tos -m "admin@$domain" --redirect; then
+    if certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email" --redirect; then
         info "SSL certificate installed successfully for $domain!"
+        return 0
     else
         error "Failed to obtain SSL certificate. Check DNS and try again."
+        return 1
     fi
 }
 
-main() {
-    check_root
+uninstall_nginx() {
     read_domain
-    install_nginx
-    setup_nginx_server_block
 
-    echo
-    prompt "Install free SSL certificate for $domain? (y/N):"
-    read -r ssl_choice
-    ssl_choice=${ssl_choice,,}
+    info "Stopping Nginx service..."
+    systemctl stop nginx || warn "Nginx service was not running."
 
-    if [[ "$ssl_choice" == "y" || "$ssl_choice" == "yes" ]]; then
-        install_certbot
-        obtain_ssl
-    else
-        info "Skipping SSL installation."
+    info "Disabling Nginx service..."
+    systemctl disable nginx || warn "Nginx service was not enabled."
+
+    info "Removing Nginx and Certbot packages..."
+    apt purge -y nginx certbot python3-certbot-nginx >/dev/null
+
+    info "Removing site configuration and web root for $domain..."
+    rm -f /etc/nginx/sites-available/"$domain"
+    rm -f /etc/nginx/sites-enabled/"$domain"
+    rm -rf /var/www/"$domain"
+
+    info "Removing Nginx Full UFW firewall rule (if exists)..."
+    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
+        ufw delete allow 'Nginx Full' || warn "Failed to remove UFW rule or it did not exist."
+        ufw reload
     fi
 
-    echo
-    info "Done! Visit your site at: http://$domain"
-    info "If SSL was installed, visit https://$domain"
+    info "Reloading systemd daemon and restarting UFW (if active)..."
+    systemctl daemon-reload
+    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
+        ufw reload
+    fi
+
+    info "Uninstallation complete. Nginx and related files removed."
 }
 
-main
+main_menu() {
+    check_root
+    while true; do
+        clear
+        osinfo=$(detect_os)
+        echo -e "${CYAN}Detected Operating System:${NC} $osinfo"
+        echo
+        echo "Please choose an option:"
+        echo "[1] Install Nginx"
+        echo "[2] Uninstall Nginx"
+        echo "[3] Exit"
+        echo
+        prompt "Enter choice [1-3]: "
+        read -r choice
+        case "$choice" in
+            1)
+                echo
+                read_domain
+                install_nginx
+                setup_nginx_server_block
+
+                echo
+                prompt "Install free SSL certificate for $domain? (y/N): "
+                read -r ssl_choice
+                ssl_choice=${ssl_choice,,}
+
+                if [[ "$ssl_choice" == "y" || "$ssl_choice" == "yes" ]]; then
+                    install_certbot
+                    prompt "Enter your email address (for Let's Encrypt notifications): "
+                    read -r email
+                    if obtain_ssl "$email"; then
+                        echo
+                        info "Done! Visit your site at: https://$domain"
+                    else
+                        echo
+                        info "SSL installation skipped due to errors. Visit your site at: http://$domain"
+                    fi
+                else
+                    info "Skipping SSL installation."
+                    echo
+                    info "Done! Visit your site at: http://$domain"
+                fi
+                prompt "Press Enter to continue..."
+                read -r _
+                ;;
+            2)
+                echo
+                uninstall_nginx
+                prompt "Press Enter to continue..."
+                read -r _
+                ;;
+            3)
+                echo
+                info "Goodbye!"
+                exit 0
+                ;;
+            *)
+                warn "Invalid choice. Please enter 1, 2, or 3."
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+main_menu
