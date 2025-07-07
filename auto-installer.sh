@@ -1,12 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# Colors for output
+# Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+BOLD='\033[1m'
+NC='\033[0m'
 
 info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
@@ -21,7 +22,6 @@ check_root() {
 }
 
 detect_os() {
-    # Attempt to detect OS and version
     if command -v lsb_release &>/dev/null; then
         os_name=$(lsb_release -si)
         os_version=$(lsb_release -sr)
@@ -140,7 +140,14 @@ obtain_ssl() {
 }
 
 uninstall_nginx() {
-    read_domain
+    info "This will uninstall Nginx and remove all sites and web roots."
+    prompt "Are you sure you want to continue? (y/N): "
+    read -r answer
+    answer=${answer,,}
+    if [[ "$answer" != "y" && "$answer" != "yes" ]]; then
+        warn "Uninstallation aborted."
+        return
+    fi
 
     info "Stopping Nginx service..."
     systemctl stop nginx || warn "Nginx service was not running."
@@ -151,10 +158,17 @@ uninstall_nginx() {
     info "Removing Nginx and Certbot packages..."
     apt purge -y nginx certbot python3-certbot-nginx >/dev/null
 
-    info "Removing site configuration and web root for $domain..."
-    rm -f /etc/nginx/sites-available/"$domain"
-    rm -f /etc/nginx/sites-enabled/"$domain"
-    rm -rf /var/www/"$domain"
+    info "Removing all site configurations in /etc/nginx/sites-available and sites-enabled..."
+    rm -f /etc/nginx/sites-available/*
+    rm -f /etc/nginx/sites-enabled/*
+
+    info "Removing all web root directories in /var/www/..."
+    # Only remove dirs with html subfolder inside (to avoid deleting unrelated folders)
+    for d in /var/www/*; do
+        if [[ -d "$d/html" ]]; then
+            rm -rf "$d"
+        fi
+    done
 
     info "Removing Nginx Full UFW firewall rule (if exists)..."
     if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
@@ -162,26 +176,32 @@ uninstall_nginx() {
         ufw reload
     fi
 
-    info "Reloading systemd daemon and restarting UFW (if active)..."
+    info "Reloading systemd daemon..."
     systemctl daemon-reload
-    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
-        ufw reload
-    fi
 
-    info "Uninstallation complete. Nginx and related files removed."
+    info "Uninstallation complete. Nginx and all sites removed."
+}
+
+print_header() {
+    local width=50
+    echo -e "${BOLD}${CYAN}$(printf '%*s' $((width / 2)) '' | tr ' ' '=')${NC}"
+    echo -e "${BOLD}${CYAN}$(printf '%*s' $(( (width - 23) / 2 )) '' )Nginx Installer Script${NC}"
+    echo -e "${BOLD}${CYAN}$(printf '%*s' $((width / 2)) '' | tr ' ' '=')${NC}"
+    echo
 }
 
 main_menu() {
     check_root
     while true; do
         clear
+        print_header
         osinfo=$(detect_os)
         echo -e "${CYAN}Detected Operating System:${NC} $osinfo"
         echo
-        echo "Please choose an option:"
-        echo "[1] Install Nginx"
-        echo "[2] Uninstall Nginx"
-        echo "[3] Exit"
+        echo -e "${BOLD}Please choose an option:${NC}"
+        echo -e "  [${GREEN}1${NC}] Install Nginx"
+        echo -e "  [${GREEN}2${NC}] Uninstall Nginx"
+        echo -e "  [${GREEN}3${NC}] Exit"
         echo
         prompt "Enter choice [1-3]: "
         read -r choice
