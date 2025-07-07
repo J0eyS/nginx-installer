@@ -8,16 +8,25 @@ Each script detects your OS version, configures NGINX with a default website for
 ## Quick Install Commands
 
 ### Ubuntu  
-`bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/install.sh)`
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/install.sh)
+```
 
 ### Debian  
-`bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/install-debian.sh)`
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/install-debian.sh)
+```
+
 
 ### CentOS / Rocky / AlmaLinux  
-`bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/install-centos.sh)`
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/install-centos.sh)
+```
 
-### Alpine Linux  
-`bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/install-alpine.sh)`
+### Alpine Linux 
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/J0eyS/nginx-installer/main/install-alpine.sh)
+```
 
 ---
 
